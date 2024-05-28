@@ -10,13 +10,13 @@ GRID_SIZE = 4
 ANT_COUNT = 50  # spawn count
 FOOD_COUNT = 20
 FPS = 30
-ANT_LIFETIME = 1000  # in number of updates
-PHEROMONE_DEPOSIT_RATE = 1  # rate at which pheromone is deposited on a cell
-PHEROMONE_SATURATION = 10  # max pheromone amount per tile
+ANT_LIFETIME = 100000  # in number of updates
+PHEROMONE_DEPOSIT_RATE = 100  # rate at which pheromone is deposited on a cell
+PHEROMONE_SATURATION = 100  # max pheromone amount per tile
 
 PHEROMONE_PROCESS_INTERVAL = 5  # process pheromones every 5 frames
-PHEROMONE_DIFFUSION_RATE = 0.0  # fraction of pheromones that get diffused to adjacent tiles
-PHEROMONE_DECAY_RATE = 0.95 # Rate at which pheromones decay
+PHEROMONE_DIFFUSION_RATE = 0.2  # fraction of pheromones that get diffused to adjacent tiles
+PHEROMONE_DECAY_RATE = 0.95  # Rate at which pheromones decay
 
 # Colors
 WHITE = (255, 255, 255)
@@ -117,16 +117,14 @@ class PheromoneManager:
         self.frame_count = 0  # to track frames for processing intervals
 
     def create_pheromone_map(self, color):
-        self.max_values[color] = 0
+        self.max_values[color] = 1
 
     def add_pheromone(self, color, x, y):
         grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
         if 0 <= grid_x < SCREEN_WIDTH // GRID_SIZE and 0 <= grid_y < SCREEN_HEIGHT // GRID_SIZE:
             if self.pheromones[color][(grid_x, grid_y)] < PHEROMONE_SATURATION:
                 self.pheromones[color][(grid_x, grid_y)] += min(PHEROMONE_DEPOSIT_RATE,
-                                                                PHEROMONE_SATURATION-int(self.pheromones[color][(grid_x, grid_y)]))
-
-            self.max_values[color] = max(self.max_values[color], self.pheromones[color][(grid_x, grid_y)])
+                                                                PHEROMONE_SATURATION - int(self.pheromones[color][(grid_x, grid_y)]))
 
     def process_pheromones(self):
         if self.frame_count % PHEROMONE_PROCESS_INTERVAL != 0:
@@ -137,16 +135,22 @@ class PheromoneManager:
 
         for color in self.pheromones:
             new_pheromones = defaultdict(float)
+            self.max_values[color] = 0
+
             for (grid_x, grid_y), strength in self.pheromones[color].items():
+
+                if self.max_values[color] < strength:
+                    self.max_values[color] = strength
+
                 strength *= PHEROMONE_DECAY_RATE
                 if strength <= PHEROMONE_DEPOSIT_RATE / 100:  # Just to cull very small values
                     continue
                 new_pheromones[(grid_x, grid_y)] = strength
                 # Diffuse pheromones to neighbors
-                diffusion_amount = strength * PHEROMONE_DIFFUSION_RATE / 8
+                diffusion_amount = strength * PHEROMONE_DIFFUSION_RATE * (strength/PHEROMONE_SATURATION) / 8
                 if diffusion_amount > PHEROMONE_DEPOSIT_RATE / 100:
                     #print(diffusion_amount)
-                    new_pheromones[(grid_x, grid_y)] -= diffusion_amount*8
+                    new_pheromones[(grid_x, grid_y)] -= diffusion_amount * 8
                     for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]:
                         nx, ny = grid_x + dx, grid_y + dy
                         if 0 <= nx < SCREEN_WIDTH // GRID_SIZE and 0 <= ny < SCREEN_HEIGHT // GRID_SIZE:
@@ -159,11 +163,16 @@ class PheromoneManager:
         for color, pheromone_map in self.pheromones.items():
             for (grid_x, grid_y), strength in pheromone_map.items():
                 if strength > 0:
-                    alpha = min(255, int(strength / PHEROMONE_SATURATION * 255))  # Normalize strength to [0, 255]
+                    alpha = min(255, int(strength / self.max_values[color] * 255))  # Normalize strength to [0, 255]
                     pheromone_color = (*color, alpha)
                     surface = pygame.Surface((GRID_SIZE, GRID_SIZE), pygame.SRCALPHA)
                     surface.fill(pheromone_color)
                     screen.blit(surface, (grid_x * GRID_SIZE, grid_y * GRID_SIZE))
+
+    def get_pheromone_strength(self, x, y):
+        grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
+        strengths = {color: self.pheromones[color][(grid_x, grid_y)] for color in self.pheromones if (grid_x, grid_y) in self.pheromones[color]}
+        return strengths
 
 def run_experiment():
     # pygame init
@@ -171,6 +180,7 @@ def run_experiment():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("Ant Colony Simulation")
     clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 24)
 
     # Pheromone manager
     pheromone_manager = PheromoneManager(PHEROMONE_DECAY_RATE)
@@ -208,6 +218,19 @@ def run_experiment():
 
         for food in food_piles:
             food.draw(screen)
+
+        # Get mouse position and corresponding grid position
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        pheromone_strengths = pheromone_manager.get_pheromone_strength(mouse_x, mouse_y)
+
+        # Display pheromone strengths on the screen
+        strength_text = ', '.join([f'{color}: {strength:.2f}' for color, strength in pheromone_strengths.items()])
+        text_surface = font.render(f'Pheromone Strengths: {strength_text}', True, BLACK)
+        screen.blit(text_surface, (10, 10))
+
+        maxval_text = f'{pheromone_manager.max_values[RED]:0.2f}'
+        mamxval_text_surface = font.render(f'Max value: {maxval_text}', True, BLACK)
+        screen.blit(mamxval_text_surface, (10, 25))
 
         pygame.display.flip()
         clock.tick(FPS)
