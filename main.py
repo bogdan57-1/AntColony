@@ -1,5 +1,5 @@
 import pygame
-from numpy import random
+import random
 import math
 
 # Constants
@@ -9,10 +9,12 @@ GRID_SIZE = 4
 ANT_COUNT = 50  # spawn count
 FOOD_COUNT = 20
 FPS = 30
-PHEROMONE_DECAY_RATE = 0.005  # Rate at which pheromones decay
-PHEROMONE_DEPOSIT_RATE = 1  # rate at which pheromone is deposited on a cell
+PHEROMONE_DECAY_RATE = 0.0005  # Rate at which pheromones decay
+PHEROMONE_DEPOSIT_RATE = 5  # rate at which pheromone is deposited on a cell
 ANT_LIFETIME = 1000  # in number of updates
-PHEROMONE_SATURATION = 20 # max pheromone amount per tile
+PHEROMONE_SATURATION = 50  # max pheromone amount per tile
+PHEROMONE_DIFFUSION_RATE = 0.05  # fraction of pheromones that get diffused to adjacent tiles
+PHEROMONE_PROCESS_INTERVAL = 5  # process pheromones every 5 frames
 
 # Colors
 WHITE = (255, 255, 255)
@@ -21,11 +23,9 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
-
 # Helper functions
 def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
 
 class Ant:
     def __init__(self, x, y, color, pheromone_manager, lifetime):
@@ -40,7 +40,7 @@ class Ant:
 
         # specific brain stuff
         self.impatience = 0
-        self.boredom_threshold = random.normal(loc=30, scale=10)  # hyperparameter
+        self.boredom_threshold = random.normalvariate(30, 10)  # hyperparameter
 
     def move(self):
         # Basic movement
@@ -69,11 +69,10 @@ class Ant:
     def update(self):
         self.brain()
         self.move()
-        self.loseHealth()
+        self.lose_health()
 
-    def loseHealth(self):
+    def lose_health(self):
         self.lifetime -= 1
-
 
 class Colony:
     def __init__(self, x, y, color, ant_count, pheromone_manager):
@@ -101,7 +100,6 @@ class Colony:
         for ant in self.ants:
             ant.draw(screen)
 
-
 class Food:
     def __init__(self, x, y):
         self.x = x
@@ -111,12 +109,12 @@ class Food:
     def draw(self, screen):
         pygame.draw.circle(screen, GREEN, (int(self.x), int(self.y)), 5)
 
-
 class PheromoneManager:
     def __init__(self, decay_rate):
         self.pheromones = {}
         self.max_values = {}  # for rendering
         self.decay_rate = decay_rate
+        self.frame_count = 0  # to track frames for processing intervals
 
     def create_pheromone_map(self, color):
         self.pheromones[color] = {}
@@ -130,8 +128,7 @@ class PheromoneManager:
         if self.pheromones[color][(grid_x, grid_y)] < PHEROMONE_SATURATION:
             self.pheromones[color][(grid_x, grid_y)] += PHEROMONE_DEPOSIT_RATE
 
-        self.max_values[color] = max(self.max_values[color],
-                                     self.pheromones[color][(grid_x, grid_y)])
+        self.max_values[color] = max(self.max_values[color], self.pheromones[color][(grid_x, grid_y)])
 
     def get_nearest_pheromone_tile(self, color, x, y, min_strength, max_range, direction=None):
         nearest_tile = None
@@ -159,30 +156,54 @@ class PheromoneManager:
             delta_angle = 2 * math.pi - delta_angle
         return delta_angle < angle
 
-    def decay_pheromones(self):
+    def process_pheromones(self):
+        if self.frame_count % PHEROMONE_PROCESS_INTERVAL != 0:
+            self.frame_count += 1
+            return
+
+        self.frame_count += 1
+
+        # Decay and diffuse
         for color in self.pheromones:
             for tile in list(self.pheromones[color].keys()):
                 self.pheromones[color][tile] -= self.decay_rate
-                if self.pheromones[color][tile] <= PHEROMONE_DEPOSIT_RATE / 5:  # just to cull very small values
+                if self.pheromones[color][tile] <= PHEROMONE_DECAY_RATE:  # Just to cull very small values
                     del self.pheromones[color][tile]
+                else:
+                    self.diffuse_pheromones(color, tile)
 
             self.max_values[color] -= self.decay_rate
+
+    def diffuse_pheromones(self, color, tile):
+        neighbors = [
+            (tile[0] - 1, tile[1]),
+            (tile[0] + 1, tile[1]),
+            (tile[0], tile[1] - 1),
+            (tile[0], tile[1] + 1),
+            (tile[0] - 1, tile[1] - 1),
+            (tile[0] + 1, tile[1] + 1),
+            (tile[0] - 1, tile[1] + 1),
+            (tile[0] + 1, tile[1] - 1)
+        ]
+
+        diffusion_amount = self.pheromones[color][tile] * PHEROMONE_DIFFUSION_RATE / len(neighbors)
+
+        for neighbor in neighbors:
+            if 0 <= neighbor[0] < SCREEN_WIDTH // GRID_SIZE and 0 <= neighbor[1] < SCREEN_HEIGHT // GRID_SIZE:
+                if neighbor not in self.pheromones[color]:
+                    self.pheromones[color][neighbor] = 0
+                self.pheromones[color][neighbor] += diffusion_amount
+
+        self.pheromones[color][tile] *= (1 - PHEROMONE_DIFFUSION_RATE)
 
     def draw_pheromones(self, screen):
         for color, pheromone_map in self.pheromones.items():
             for (grid_x, grid_y), strength in pheromone_map.items():
-                alpha = strength / PHEROMONE_SATURATION * 255  # Normalize strength to [0, 255]
-
-                drawcolor = color
-                if strength > PHEROMONE_SATURATION * 0.75:
-                    drawcolor = BLUE
-                    alpha = 255
-
-                pheromone_color = (*drawcolor, alpha)
+                alpha = min(255, int(strength / PHEROMONE_SATURATION * 255))  # Normalize strength to [0, 255]
+                pheromone_color = (*color, alpha)
                 surface = pygame.Surface((GRID_SIZE, GRID_SIZE), pygame.SRCALPHA)
                 surface.fill(pheromone_color)
                 screen.blit(surface, (grid_x * GRID_SIZE, grid_y * GRID_SIZE))
-
 
 def run_experiment():
     # pygame init
@@ -196,19 +217,16 @@ def run_experiment():
 
     # colonies and food init
     colonies = [
-        Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), RED, ANT_COUNT,
-               pheromone_manager),
-        # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLUE, ANT_COUNT,
-        #      pheromone_manager),
-        # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLACK, ANT_COUNT,
-        #       pheromone_manager)
+        Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), RED, ANT_COUNT, pheromone_manager),
+        # Uncomment to add more colonies
+        # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLUE, ANT_COUNT, pheromone_manager),
+        # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLACK, ANT_COUNT, pheromone_manager)
     ]
 
     for colony in colonies:
         pheromone_manager.create_pheromone_map(colony.color)
 
-    food_piles = [Food(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50)) for _ in
-                  range(FOOD_COUNT)]
+    food_piles = [Food(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50)) for _ in range(FOOD_COUNT)]
 
     # pygame stuff
     running = True
@@ -221,7 +239,7 @@ def run_experiment():
 
         screen.fill(WHITE)
 
-        pheromone_manager.decay_pheromones()
+        pheromone_manager.process_pheromones()
         pheromone_manager.draw_pheromones(screen)
 
         for colony in colonies:
@@ -235,7 +253,6 @@ def run_experiment():
         clock.tick(FPS)
 
     pygame.quit()
-
 
 # Perform the experiments
 run_experiment()
