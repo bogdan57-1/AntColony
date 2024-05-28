@@ -1,6 +1,10 @@
 import pygame
 import random
 import math
+import numpy as np
+import pycuda.driver as cuda
+import pycuda.autoinit
+from pycuda.compiler import SourceModule
 
 # Constants
 SCREEN_WIDTH = 1000
@@ -23,9 +27,11 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
+
 # Helper functions
 def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
 
 class Ant:
     def __init__(self, x, y, color, pheromone_manager, lifetime):
@@ -74,6 +80,7 @@ class Ant:
     def lose_health(self):
         self.lifetime -= 1
 
+
 class Colony:
     def __init__(self, x, y, color, ant_count, pheromone_manager):
         self.x = x
@@ -100,6 +107,7 @@ class Colony:
         for ant in self.ants:
             ant.draw(screen)
 
+
 class Food:
     def __init__(self, x, y):
         self.x = x
@@ -109,6 +117,7 @@ class Food:
     def draw(self, screen):
         pygame.draw.circle(screen, GREEN, (int(self.x), int(self.y)), 5)
 
+
 class PheromoneManager:
     def __init__(self, decay_rate):
         self.pheromones = {}
@@ -116,45 +125,46 @@ class PheromoneManager:
         self.decay_rate = decay_rate
         self.frame_count = 0  # to track frames for processing intervals
 
+        # CUDA setup
+        self.mod = SourceModule("""
+        __global__ void decay_diffuse(float *pheromones, int width, int height, float decay_rate, float diffusion_rate) {
+            int x = blockIdx.x * blockDim.x + threadIdx.x;
+            int y = blockIdx.y * blockDim.y + threadIdx.y;
+            int idx = y * width + x;
+
+            if (x >= width || y >= height) return;
+
+            float pheromone = pheromones[idx];
+            if (pheromone > 0) {
+                pheromones[idx] -= decay_rate;
+                if (pheromones[idx] < 0) pheromones[idx] = 0;
+
+                float diffusion_amount = pheromone * diffusion_rate / 8;
+                if (x > 0) pheromones[idx - 1] += diffusion_amount;  // Left
+                if (x < width - 1) pheromones[idx + 1] += diffusion_amount;  // Right
+                if (y > 0) pheromones[idx - width] += diffusion_amount;  // Up
+                if (y < height - 1) pheromones[idx + width] += diffusion_amount;  // Down
+                if (x > 0 && y > 0) pheromones[idx - width - 1] += diffusion_amount;  // Up-Left
+                if (x < width - 1 && y > 0) pheromones[idx - width + 1] += diffusion_amount;  // Up-Right
+                if (x > 0 && y < height - 1) pheromones[idx + width - 1] += diffusion_amount;  // Down-Left
+                if (x < width - 1 && y < height - 1) pheromones[idx + width + 1] += diffusion_amount;  // Down-Right
+            }
+        }
+        """)
+
+        self.decay_diffuse = self.mod.get_function("decay_diffuse")
+
     def create_pheromone_map(self, color):
-        self.pheromones[color] = {}
+        self.pheromones[color] = np.zeros((SCREEN_WIDTH // GRID_SIZE, SCREEN_HEIGHT // GRID_SIZE), dtype=np.float32)
         self.max_values[color] = 0
 
     def add_pheromone(self, color, x, y):
         grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
-        if (grid_x, grid_y) not in self.pheromones[color]:
-            self.pheromones[color][(grid_x, grid_y)] = 0
+        if 0 <= grid_x < self.pheromones[color].shape[0] and 0 <= grid_y < self.pheromones[color].shape[1]:
+            if self.pheromones[color][grid_x, grid_y] < PHEROMONE_SATURATION:
+                self.pheromones[color][grid_x, grid_y] += PHEROMONE_DEPOSIT_RATE
 
-        if self.pheromones[color][(grid_x, grid_y)] < PHEROMONE_SATURATION:
-            self.pheromones[color][(grid_x, grid_y)] += PHEROMONE_DEPOSIT_RATE
-
-        self.max_values[color] = max(self.max_values[color], self.pheromones[color][(grid_x, grid_y)])
-
-    def get_nearest_pheromone_tile(self, color, x, y, min_strength, max_range, direction=None):
-        nearest_tile = None
-        nearest_distance = max_range
-        grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
-
-        for (px, py), strength in self.pheromones[color].items():
-            if strength >= min_strength:
-                dist = distance(grid_x, grid_y, px, py)
-                if dist < nearest_distance:
-                    if direction is None or self.is_in_cone(x, y, px * GRID_SIZE, py * GRID_SIZE, direction, max_range):
-                        nearest_distance = dist
-                        nearest_tile = (px * GRID_SIZE + GRID_SIZE // 2, py * GRID_SIZE + GRID_SIZE // 2)
-
-        return nearest_tile
-
-    def is_in_cone(self, x1, y1, x2, y2, direction, max_range, angle=math.pi / 4):
-        dx, dy = x2 - x1, y2 - y1
-        dist = math.sqrt(dx ** 2 + dy ** 2)
-        if dist > max_range:
-            return False
-        angle_to_target = math.atan2(dy, dx)
-        delta_angle = abs(direction - angle_to_target)
-        if delta_angle > math.pi:
-            delta_angle = 2 * math.pi - delta_angle
-        return delta_angle < angle
+            self.max_values[color] = max(self.max_values[color], self.pheromones[color][grid_x, grid_y])
 
     def process_pheromones(self):
         if self.frame_count % PHEROMONE_PROCESS_INTERVAL != 0:
@@ -163,47 +173,33 @@ class PheromoneManager:
 
         self.frame_count += 1
 
-        # Decay and diffuse
         for color in self.pheromones:
-            for tile in list(self.pheromones[color].keys()):
-                self.pheromones[color][tile] -= self.decay_rate
-                if self.pheromones[color][tile] <= PHEROMONE_DECAY_RATE:  # Just to cull very small values
-                    del self.pheromones[color][tile]
-                else:
-                    self.diffuse_pheromones(color, tile)
+            pheromone_array = self.pheromones[color].flatten()
+            pheromones_gpu = cuda.mem_alloc(pheromone_array.nbytes)
+            cuda.memcpy_htod(pheromones_gpu, pheromone_array)
 
-            self.max_values[color] -= self.decay_rate
+            width, height = self.pheromones[color].shape
+            block_size = (16, 16, 1)
+            grid_size = (width // block_size[0] + 1, height // block_size[1] + 1, 1)
 
-    def diffuse_pheromones(self, color, tile):
-        neighbors = [
-            (tile[0] - 1, tile[1]),
-            (tile[0] + 1, tile[1]),
-            (tile[0], tile[1] - 1),
-            (tile[0], tile[1] + 1),
-            (tile[0] - 1, tile[1] - 1),
-            (tile[0] + 1, tile[1] + 1),
-            (tile[0] - 1, tile[1] + 1),
-            (tile[0] + 1, tile[1] - 1)
-        ]
+            self.decay_diffuse(pheromones_gpu, np.int32(width), np.int32(height), np.float32(self.decay_rate),
+                               np.float32(PHEROMONE_DIFFUSION_RATE), block=block_size, grid=grid_size)
 
-        diffusion_amount = self.pheromones[color][tile] * PHEROMONE_DIFFUSION_RATE / len(neighbors)
+            cuda.memcpy_dtoh(pheromone_array, pheromones_gpu)
+            self.pheromones[color] = pheromone_array.reshape((width, height))
 
-        for neighbor in neighbors:
-            if 0 <= neighbor[0] < SCREEN_WIDTH // GRID_SIZE and 0 <= neighbor[1] < SCREEN_HEIGHT // GRID_SIZE:
-                if neighbor not in self.pheromones[color]:
-                    self.pheromones[color][neighbor] = 0
-                self.pheromones[color][neighbor] += diffusion_amount
-
-        self.pheromones[color][tile] *= (1 - PHEROMONE_DIFFUSION_RATE)
+            self.max_values[color] = np.max(self.pheromones[color])
 
     def draw_pheromones(self, screen):
         for color, pheromone_map in self.pheromones.items():
-            for (grid_x, grid_y), strength in pheromone_map.items():
-                alpha = min(255, int(strength / PHEROMONE_SATURATION * 255))  # Normalize strength to [0, 255]
-                pheromone_color = (*color, alpha)
-                surface = pygame.Surface((GRID_SIZE, GRID_SIZE), pygame.SRCALPHA)
-                surface.fill(pheromone_color)
-                screen.blit(surface, (grid_x * GRID_SIZE, grid_y * GRID_SIZE))
+            for (grid_x, grid_y), strength in np.ndenumerate(pheromone_map):
+                if strength > 0:
+                    alpha = min(255, int(strength / PHEROMONE_SATURATION * 255))  # Normalize strength to [0, 255]
+                    pheromone_color = (*color, alpha)
+                    surface = pygame.Surface((GRID_SIZE, GRID_SIZE), pygame.SRCALPHA)
+                    surface.fill(pheromone_color)
+                    screen.blit(surface, (grid_x * GRID_SIZE, grid_y * GRID_SIZE))
+
 
 def run_experiment():
     # pygame init
@@ -217,7 +213,8 @@ def run_experiment():
 
     # colonies and food init
     colonies = [
-        Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), RED, ANT_COUNT, pheromone_manager),
+        Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), RED, ANT_COUNT,
+               pheromone_manager),
         # Uncomment to add more colonies
         # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLUE, ANT_COUNT, pheromone_manager),
         # Colony(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50), BLACK, ANT_COUNT, pheromone_manager)
@@ -226,7 +223,8 @@ def run_experiment():
     for colony in colonies:
         pheromone_manager.create_pheromone_map(colony.color)
 
-    food_piles = [Food(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50)) for _ in range(FOOD_COUNT)]
+    food_piles = [Food(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50)) for _ in
+                  range(FOOD_COUNT)]
 
     # pygame stuff
     running = True
@@ -253,6 +251,7 @@ def run_experiment():
         clock.tick(FPS)
 
     pygame.quit()
+
 
 # Perform the experiments
 run_experiment()
