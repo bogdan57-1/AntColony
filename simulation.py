@@ -2,28 +2,6 @@ import pygame
 import random
 import math
 from collections import defaultdict
-from config import SimulationConfig
-from factory import SimulationFactory
-from config import load_config_from_file
-
-# Constants
-SCREEN_WIDTH = 1000
-SCREEN_HEIGHT = 1000
-GRID_SIZE = 7
-ANT_COUNT = 50  # spawn count
-
-FPS = 30
-ANT_LIFETIME = 3000  # in number of updates
-PHEROMONE_DEPOSIT_RATE = 100  # rate at which pheromone is deposited on a cell
-PHEROMONE_SATURATION = 100  # max pheromone amount per tile
-
-PHEROMONE_PROCESS_INTERVAL = 5  # process pheromones every 5 frames
-PHEROMONE_DIFFUSION_RATE = 0.2  # fraction of pheromones that get diffused to adjacent tiles
-PHEROMONE_DECAY_RATE = 0.95  # Rate at which pheromones decay
-
-PHEROMONE_CULL_THRESHOLD = PHEROMONE_DEPOSIT_RATE / 100  # below which tiles will be deleted
-
-FOOD_PILES_COUNT = 50
 
 # Colors
 WHITE = (255, 255, 255)
@@ -38,13 +16,13 @@ def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
 
-def gridCoord(grid_x, grid_y):
+def gridCoord(grid_x, grid_y, grid_size):
     # return the center coordinate of the grid
-    return grid_x * GRID_SIZE - GRID_SIZE // 2, grid_y * GRID_SIZE - GRID_SIZE // 2
+    return grid_x * grid_size - grid_size // 2, grid_y * grid_size - grid_size // 2
 
 
 class Ant:
-    def __init__(self, x, y, color, pheromone_manager, lifetime, home, food_manager, colony):
+    def __init__(self, x, y, color, pheromone_manager, lifetime, home, food_manager, colony, args):
         self.x = x
         self.y = y
         self.color = color
@@ -54,40 +32,50 @@ class Ant:
         self.pheromone_manager = pheromone_manager
         self.lifetime = random.uniform(500, lifetime)
         self.viewRange = 50
-        self.pheromone_detection_threshold = PHEROMONE_CULL_THRESHOLD
+        self.pheromone_detection_threshold = args.pheromone_cull_threshold
         self.foodCarry = 0
         self.biteSize = 10  # how much food can pick up at one time
         self.home = home
         self.layPheromone = False
         self.food_manager = food_manager
         self.colony = colony
+        self.args = args
 
         # specific brain stuff
         self.impatience = 0
         self.boredom_threshold = random.normalvariate(30, 10)  # hyperparameter
+
+        # logging
+        self.stats = {
+            'distanceTravelled' : 0
+        }
 
     def move(self):
         # Basic movement
         self.x += math.cos(self.angle) * self.speed
         self.y += math.sin(self.angle) * self.speed
 
+
         # Boundary checking
-        if self.x < 0 or self.x > SCREEN_WIDTH or self.y < 0 or self.y > SCREEN_HEIGHT:
+        if self.x < 0 or self.x > self.args.screen_width or self.y < 0 or self.y > self.args.screen_height:
             self.angle += math.pi
+
+        # log
+        self.stats['distanceTravelled'] += self.speed
 
     def draw(self, screen):
         pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), 2)
 
     def detectPheromones(self):
-        grid_x, grid_y = int(self.x / GRID_SIZE), int(self.y / GRID_SIZE)
+        grid_x, grid_y = int(self.x / self.args.grid_size), int(self.y / self.args.grid_size)
         max_strength = 0
         best_tile = None
 
-        for dx in range(-self.viewRange // GRID_SIZE, self.viewRange // GRID_SIZE + 1):
-            for dy in range(-self.viewRange // GRID_SIZE, self.viewRange // GRID_SIZE + 1):
+        for dx in range(-self.viewRange // self.args.grid_size, self.viewRange // self.args.grid_size + 1):
+            for dy in range(-self.viewRange // self.args.grid_size, self.viewRange // self.args.grid_size + 1):
                 nx, ny = grid_x + dx, grid_y + dy
-                if 0 <= nx < SCREEN_WIDTH // GRID_SIZE and 0 <= ny < SCREEN_HEIGHT // GRID_SIZE:
-                    world_x, world_y = nx * GRID_SIZE + GRID_SIZE // 2, ny * GRID_SIZE + GRID_SIZE // 2
+                if 0 <= nx < self.args.screen_width // self.args.grid_size and 0 <= ny < self.args.screen_height // self.args.grid_size:
+                    world_x, world_y = nx * self.args.grid_size + self.args.grid_size // 2, ny * self.args.grid_size + self.args.grid_size // 2
                     if is_in_cone(self.x, self.y, world_x, world_y, self.angle, self.viewRange):
                         strength = self.pheromone_manager.pheromones[self.color][(nx, ny)]
                         if (strength > max_strength
@@ -162,26 +150,42 @@ class Ant:
 
 
 class Colony:
-    def __init__(self, x, y, color, ant_count, pheromone_manager, food_manager):
+    def __init__(self, x, y, color, args, pheromone_manager, food_manager):
         self.x = x
         self.y = y
         self.color = color
-        self.ants = [Ant(x, y, color, pheromone_manager, ANT_LIFETIME, {'x': x, 'y': y}, food_manager, self) for _ in
-                     range(ant_count)]
+        self.pheromone_manager = pheromone_manager
+        self.food_manager = food_manager
+        self.ants = [Ant(x, y, color, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
+                     for _ in
+                     range(args.ant_count)]
         self.food_collected = 0
+        self.args = args
+        self.cycles_to_spawn = args.cycles_to_spawn
 
         # logging
         self.stats = {
             'food': 0,
             'currentAnts': len(self.ants),
             'deadAnts': 0,
-            'cyclesToSpawn': 0
+            'cycles_to_spawn': self.cycles_to_spawn
         }
 
     def depositFood(self, amount):
         self.stats['food'] += amount
 
+    def spawnAnts(self, amount):
+        for _ in range(amount):
+            home = {'x': self.x, 'y': self.y}
+            self.ants.append(
+                Ant(self.x, self.y, self.color, self.pheromone_manager, self.args.ant_lifetime, home,
+                    self.food_manager, self, self.args))
+        self.stats['currentAnts'] = len(self.ants)
+
     def update(self):
+        self.cycles_to_spawn -= 1
+        self.stats['cycles_to_spawn'] = self.cycles_to_spawn
+
         ants_to_remove = []
         for ant in self.ants:
             ant.update()
@@ -194,6 +198,12 @@ class Colony:
             self.ants.remove(ant)
             del ant  # smart pointer stuff
             self.stats['deadAnts'] += 1
+            self.stats['currentAnts'] = len(self.ants)
+
+        if self.cycles_to_spawn <= 0:
+            self.cycles_to_spawn = self.args.cycles_to_spawn
+            self.spawnAnts(self.args.ants_spawn_number)
+
 
     def draw(self, screen):
         pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), 10)
@@ -219,28 +229,32 @@ class Food:
 
 
 class FoodManager:
-    def __init__(self):
+    def __init__(self, args):
         self.grid = defaultdict(list)
+        self.args = args
+        self.food_piles_count = args.food_piles_count
+        self.grid_size = args.grid_size
         self._populate_grid()
 
     def _populate_grid(self):
-        for _ in range(FOOD_PILES_COUNT):
-            food = Food(random.randint(50, SCREEN_WIDTH - 50), random.randint(50, SCREEN_HEIGHT - 50))
-            grid_x, grid_y = int(food.x / GRID_SIZE), int(food.y / GRID_SIZE)
+        for _ in range(self.food_piles_count):
+            food = Food(random.randint(50, self.args.screen_width - 50),
+                        random.randint(50, self.args.screen_height - 50))
+            grid_x, grid_y = int(food.x / self.grid_size), int(food.y / self.grid_size)
             self.grid[(grid_x, grid_y)].append(food)
 
     def _remove_from_grid(self, food):
-        grid_x, grid_y = int(food.x / GRID_SIZE), int(food.y / GRID_SIZE)
+        grid_x, grid_y = int(food.x / self.grid_size), int(food.y / self.grid_size)
         if food in self.grid[(grid_x, grid_y)]:
             self.grid[(grid_x, grid_y)].remove(food)
             if not self.grid[(grid_x, grid_y)]:
                 del self.grid[(grid_x, grid_y)]
 
     def _get_nearby_food_piles(self, x, y, dist):
-        grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
+        grid_x, grid_y = int(x / self.grid_size), int(y / self.grid_size)
         nearby_food = []
-        for dx in range(-dist // GRID_SIZE, dist // GRID_SIZE + 1):
-            for dy in range(-dist // GRID_SIZE, dist // GRID_SIZE + 1):
+        for dx in range(-dist // self.grid_size, dist // self.grid_size + 1):
+            for dy in range(-dist // self.grid_size, dist // self.grid_size + 1):
                 nx, ny = grid_x + dx, grid_y + dy
                 if (nx, ny) in self.grid:
                     nearby_food.extend(self.grid[(nx, ny)])
@@ -291,14 +305,14 @@ class PheromoneManager:
 
     def add_pheromone(self, color, x, y):
         grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
-        if 0 <= grid_x < SCREEN_WIDTH // GRID_SIZE and 0 <= grid_y < SCREEN_HEIGHT // GRID_SIZE:
-            if self.pheromones[color][(grid_x, grid_y)] < PHEROMONE_SATURATION:
-                self.pheromones[color][(grid_x, grid_y)] += min(PHEROMONE_DEPOSIT_RATE,
-                                                                PHEROMONE_SATURATION - int(
+        if 0 <= grid_x < self.args.screen_width // self.args.grid_size and 0 <= grid_y < self.args.screen_height // self.args.grid_size:
+            if self.pheromones[color][(grid_x, grid_y)] < self.args.pheromone_saturation:
+                self.pheromones[color][(grid_x, grid_y)] += min(self.args.pheromone_deposit_rate,
+                                                                self.args.pheromone_saturation - int(
                                                                     self.pheromones[color][(grid_x, grid_y)]))
 
     def process_pheromones(self):
-        if self.frame_count % PHEROMONE_PROCESS_INTERVAL != 0:
+        if self.frame_count % self.args.pheromone_process_interval != 0:
             self.frame_count += 1
             return
 
@@ -313,18 +327,18 @@ class PheromoneManager:
                 if self.max_values[color] < strength:
                     self.max_values[color] = strength
 
-                strength *= PHEROMONE_DECAY_RATE
-                if strength <= PHEROMONE_CULL_THRESHOLD:  # Just to cull very small values
+                strength *= self.args.pheromone_decay_rate
+                if strength <= self.args.pheromone_cull_threshold:  # Just to cull very small values
                     continue
                 new_pheromones[(grid_x, grid_y)] = strength
                 # Diffuse pheromones to neighbors
-                diffusion_amount = strength * PHEROMONE_DIFFUSION_RATE * (strength / PHEROMONE_SATURATION) / 8
-                if diffusion_amount > PHEROMONE_CULL_THRESHOLD:
-                    # print(diffusion_amount)
+                diffusion_amount = strength * self.args.pheromone_diffusion_rate * (
+                        strength / self.args.pheromone_saturation) / 8
+                if diffusion_amount > self.args.pheromone_cull_threshold:
                     new_pheromones[(grid_x, grid_y)] -= diffusion_amount * 8
                     for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]:
                         nx, ny = grid_x + dx, grid_y + dy
-                        if 0 <= nx < SCREEN_WIDTH // GRID_SIZE and 0 <= ny < SCREEN_HEIGHT // GRID_SIZE:
+                        if 0 <= nx < self.args.screen_width // self.args.grid_size and 0 <= ny < self.args.screen_height // self.args.grid_size:
                             new_pheromones[(nx, ny)] += diffusion_amount
 
             self.pheromones[color] = new_pheromones
@@ -337,12 +351,12 @@ class PheromoneManager:
                     alpha = min(255,
                                 int(strength / (self.max_values[color] + 1) * 255))  # Normalize strength to [0, 255]
                     pheromone_color = (*color, alpha)
-                    surface = pygame.Surface((GRID_SIZE, GRID_SIZE), pygame.SRCALPHA)
+                    surface = pygame.Surface((self.args.grid_size, self.args.grid_size), pygame.SRCALPHA)
                     surface.fill(pheromone_color)
-                    screen.blit(surface, (grid_x * GRID_SIZE, grid_y * GRID_SIZE))
+                    screen.blit(surface, (grid_x * self.args.grid_size, grid_y * self.args.grid_size))
 
     def get_pheromone_strength(self, x, y):  # for mouse input
-        grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
+        grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
         strengths = {color: self.pheromones[color][(grid_x, grid_y)] for color in self.pheromones if
                      (grid_x, grid_y) in self.pheromones[color]}
         return strengths
@@ -350,80 +364,16 @@ class PheromoneManager:
     def get_nearest_pheromone_tile(self, color, x, y, min_strength, max_range, direction=None):
         nearest_tile = None
         nearest_distance = max_range
-        grid_x, grid_y = int(x / GRID_SIZE), int(y / GRID_SIZE)
+        grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
 
         for (px, py), strength in self.pheromones[color].items():
             if strength >= min_strength:
                 dist = distance(grid_x, grid_y, px, py)
                 if dist < nearest_distance:
-                    if direction is None or is_in_cone(x, y, px * GRID_SIZE, py * GRID_SIZE, direction, max_range):
+                    if direction is None or is_in_cone(x, y, px * self.args.grid_size, py * self.args.grid_size,
+                                                       direction, max_range):
                         nearest_distance = dist
-                        nearest_tile = (px * GRID_SIZE + GRID_SIZE // 2, py * GRID_SIZE + GRID_SIZE // 2)
+                        nearest_tile = (px * self.args.grid_size + self.args.grid_size // 2,
+                                        py * self.args.grid_size + self.args.grid_size // 2)
 
         return nearest_tile
-
-
-def run_experiment_with_config(config):
-    screen, pheromone_manager, food_manager, colonies = SimulationFactory.create_simulation(config)
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont(None, 24)
-
-    running = True
-    cycles = 0
-    while running:
-        cycles += 1
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYUP:
-                running = False
-
-        screen.fill((255, 255, 255))
-
-        pheromone_manager.process_pheromones()
-        pheromone_manager.draw_pheromones(screen)
-
-        for colony in colonies:
-            colony.update()
-            colony.draw(screen)
-
-        food_manager.update_and_draw(screen)
-
-        # Get mouse position and corresponding grid position
-        mouse_x, mouse_y = pygame.mouse.get_pos()
-        pheromone_strengths = pheromone_manager.get_pheromone_strength(mouse_x, mouse_y)
-
-        # Display pheromone strengths on the screen
-        strength_text = ', '.join([f'{color}: {strength:.2f}' for color, strength in pheromone_strengths.items()])
-        text_surface = font.render(f'Pheromone Strengths: {strength_text}', True, (0, 0, 0))
-        screen.blit(text_surface, (10, 10))
-
-        # show max pheromone value
-        maxval_text = f'{pheromone_manager.max_values[(255, 0, 0)]:0.2f}'
-        mamxval_text_surface = font.render(f'Max value: {maxval_text}', True, (0, 0, 0))
-        screen.blit(mamxval_text_surface, (10, 25))
-
-        # get colony stats and print on screen
-        i = 0
-        for colony in colonies:
-            stats = colony.getStats()
-            stats_text = (f'Colony {colony.color}: Food: {stats["food"]}, '
-                          f'Current Ants: {stats["currentAnts"]}, Dead Ants: {stats["deadAnts"]}')
-            stats_surface = font.render(stats_text, True, colony.color)
-            screen.blit(stats_surface, (10, 40 + i * 15))
-            i += 1
-
-        cycles_text = f'Cycles:{cycles}'
-        cycles_surface = font.render(cycles_text, True, (0, 0, 0))
-        screen.blit(cycles_surface, (10, 85))
-
-        pygame.display.flip()
-        clock.tick(config.fps)
-
-    pygame.quit()
-
-
-if __name__ == "__main__":
-    config_path = 'path_to_your_config_file.json'
-    config = load_config_from_file(config_path)
-    run_experiment_with_config(config)

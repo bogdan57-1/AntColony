@@ -8,8 +8,10 @@
     "pheromone_deposit_rate": 100,
     "pheromone_saturation": 100,
     "pheromone_process_interval": 5,
-    "pheromone_diffusion_rate": 0.2,
-    "pheromone_decay_rate": 0.95,
+    "pheromone_diffusion_rate": 0.4,
+    "pheromone_decay_rate": 0.99,
     "pheromone_cull_threshold": 1,
-    "food_piles_count": 50
+    "food_piles_count": 50,
+    "ants_spawn_number" : 10,
+    "cycles_to_spawn": 2000
 }
