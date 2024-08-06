@@ -1,9 +1,9 @@
 {
     "screen_width": 1000,
     "screen_height": 1000,
-    "grid_size": 7,
+    "grid_size": 5,
     "fps": 30,
-    "ant_count": 50,
+    "ant_count": 100,
     "ant_lifetime": 3000,
     "pheromone_deposit_rate": 100,
     "pheromone_saturation": 100,
@@ -13,5 +13,6 @@
     "pheromone_cull_threshold": 1,
     "food_piles_count": 50,
     "ants_spawn_number" : 10,
-    "cycles_to_spawn": 2000
+    "cycles_to_spawn": 2000,
+    "ant_speed": 2
 }
