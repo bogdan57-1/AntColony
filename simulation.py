@@ -2,56 +2,49 @@ import pygame
 import random
 import math
 from collections import defaultdict
-from scipy.stats import norm
 import numpy as np
 
-# Colors
+# Colors for visual differentiation
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
-
 # Helper functions
 def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-
 
 def gridCoord(grid_x, grid_y, grid_size):
     # return the center coordinate of the grid
     return grid_x * grid_size - grid_size // 2, grid_y * grid_size - grid_size // 2
 
-
 def sampleTile(tiles, samples=1):
     if not tiles:
         return []
 
-    strs = np.array([tile[2] for tile in tiles])
+    strengths = np.array([tile[2] for tile in tiles])
 
-    ## bias towards higher values - power transform
-    if True:
-        alpha = 2
-        strs = strs ** alpha
-    ##
+    # Bias towards higher values - power transform
+    alpha = 2
+    strengths = strengths ** alpha
 
-    sum = strs.sum()
-    if sum:  # don't divide by 0
-        probs = strs / sum
+    sum_strengths = strengths.sum()
+    if sum_strengths:  # avoid division by 0
+        probs = strengths / sum_strengths
     else:
-        return []  # no pheromone tiles; submit to other behaviour
+        return []  # no pheromone tiles; submit to other behavior
 
     sampled_indices = np.random.choice(len(tiles), size=samples, p=probs)
     sampled_tiles = [tiles[i] for i in sampled_indices]  # samples = 1 for now
 
     return sampled_tiles
 
-
 class Ant:
-    def __init__(self, x, y, color, pheromone_manager, lifetime, home, food_manager, colony, args):
+    def __init__(self, x, y, colony_id, pheromone_manager, lifetime, home, food_manager, colony, args):
         self.x = x
         self.y = y
-        self.color = color
+        self.colony_id = colony_id
         self.food = False
         self.angle = random.uniform(0, 2 * math.pi)
         self.speed = args.ant_speed
@@ -60,7 +53,7 @@ class Ant:
         self.viewRange = 20
         self.pheromone_detection_threshold = args.pheromone_cull_threshold
         self.foodCarry = 0
-        self.biteSize = 10  # how much food can pick up at one time
+        self.biteSize = 10  # how much food can be picked up at one time
         self.home = home
         self.layPheromone = False
         self.food_manager = food_manager
@@ -77,11 +70,11 @@ class Ant:
         }
 
     def move(self):
-        # Basic movement
+        # basic movement
         self.x += math.cos(self.angle) * self.speed
         self.y += math.sin(self.angle) * self.speed
 
-        # Boundary checking
+        # check for boundaries
         if self.x < 0 or self.x > self.args.screen_width or self.y < 0 or self.y > self.args.screen_height:
             self.angle += math.pi
 
@@ -89,13 +82,13 @@ class Ant:
         self.stats['distanceTravelled'] += self.speed
 
     def draw(self, screen):
-        col = self.color
+        color = self.colony.color
         if self.food:
-            col = GREEN
+            color = GREEN
 
-        pygame.draw.circle(screen, col, (int(self.x), int(self.y)), 2)
+        pygame.draw.circle(screen, color, (int(self.x), int(self.y)), 2)
 
-    def detectPheromones(self):
+    def detectPheromones(self, pheromone_type='food'):
         grid_x, grid_y = int(self.x / self.args.grid_size), int(self.y / self.args.grid_size)
         pheromone_tiles = []
 
@@ -103,13 +96,14 @@ class Ant:
         grid_count_w = self.args.screen_width // self.args.grid_size  # how many grids there are; width
         grid_count_h = self.args.screen_height // self.args.grid_size  # height
 
-        # could maybe improve this with numpy later
+        # check tile neighbours in range for pheromones
+        # could also change to np.roll later if there's performance issues
         for dx in range(-grid_range, grid_range + 1):
             for dy in range(-grid_range, grid_range + 1):
                 cx, cy = grid_x + dx, grid_y + dy  # current relevant grid
                 if 0 <= cx < grid_count_w and 0 <= cy < grid_count_h:
                     world_x, world_y = gridCoord(cx, cy, self.args.grid_size)  # grid to world
-                    strength = self.pheromone_manager.pheromones[self.color][(cx, cy)]
+                    strength = self.pheromone_manager.get_pheromone_strength(cx, cy, self.colony_id, pheromone_type)
                     if (cx, cy) != (grid_x, grid_y) and strength > 0:
                         pheromone_tiles.append((world_x, world_y, strength))
 
@@ -143,7 +137,7 @@ class Ant:
     def carriesFoodBehaviour(self):
         noise = random.normalvariate(0, math.pi / 2)  # have a bit of noise each time unless close to home
         if random.randint(0, 10) < 3:  # once in a while bias towards pheromone trail
-            detected_pheromone_tiles = self.detectPheromones()
+            detected_pheromone_tiles = self.detectPheromones('home')
             if detected_pheromone_tiles:
                 target_x, target_y, _ = detected_pheromone_tiles[0] # just the first one for now
                 pheromone_angle = math.atan2(target_y - self.y, target_x - self.x)
@@ -154,11 +148,11 @@ class Ant:
         else:
             self.walkToTarget(self.home['x'], self.home['y'])
 
-        self.layPheromone = True
+        self.layPheromone = 'food'
         self.checkIfHomeBehaviour()
 
     def sniffPheromonesBehaviour(self):
-        detected_tiles = self.detectPheromones()  # returns all tiles around with str > 0
+        detected_tiles = self.detectPheromones('food')  # returns all tiles around with strength > 0
         if detected_tiles:
             # probabilistically samples pheromone tiles
             target_x, target_y, _ = sampleTile(detected_tiles)[0]
@@ -186,7 +180,7 @@ class Ant:
         self.move()
 
         if self.layPheromone:
-            self.pheromone_manager.add_pheromone(self.color, self.x, self.y)
+            self.pheromone_manager.add_pheromone(self.colony_id, self.x, self.y, self.layPheromone)
 
         self.lose_health()
 
@@ -195,15 +189,15 @@ class Ant:
 
 
 class Colony:
-    def __init__(self, x, y, color, args, pheromone_manager, food_manager):
+    def __init__(self, x, y, colony_id, color, args, pheromone_manager, food_manager):
         self.x = x
         self.y = y
+        self.colony_id = colony_id
         self.color = color
         self.pheromone_manager = pheromone_manager
         self.food_manager = food_manager
-        self.ants = [Ant(x, y, color, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
-                     for _ in
-                     range(args.ant_count)]
+        self.ants = [Ant(x, y, colony_id, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
+                     for _ in range(args.ant_count)]
         self.food_collected = 0
         self.args = args
         self.cycles_to_spawn = args.cycles_to_spawn
@@ -223,7 +217,7 @@ class Colony:
         for _ in range(amount):
             home = {'x': self.x, 'y': self.y}
             self.ants.append(
-                Ant(self.x, self.y, self.color, self.pheromone_manager, self.args.ant_lifetime, home,
+                Ant(self.x, self.y, self.colony_id, self.pheromone_manager, self.args.ant_lifetime, home,
                     self.food_manager, self, self.args))
         self.stats['currentAnts'] = len(self.ants)
 
@@ -335,109 +329,123 @@ def is_in_cone(x1, y1, x2, y2, direction, max_range, angle=math.pi / 4, min_rang
         delta_angle = 2 * math.pi - delta_angle
     return delta_angle < angle
 
-
 class PheromoneManager:
     def __init__(self, args):
-        self.pheromones = defaultdict(lambda: defaultdict(float))
         self.args = args
-        self.max_values = defaultdict(float)  # for rendering
         self.decay_rate = args.pheromone_decay_rate
         self.frame_count = 0  # to track frames for processing intervals
 
-    def add_pheromone(self, color, x, y):
-        # removed bounds checking since the ant will always be on the screen anyway
+        grid_w = args.screen_width // args.grid_size
+        grid_h = args.screen_height // args.grid_size
 
-        # how are pheromones deposited?
-        # can have the ant top it up to a certain amount
-        # or get stronger as the ant sits on it
+        # switched to numpy arrays for performance
+        self.pheromones = {
+            'home': np.zeros((args.num_colonies, grid_w, grid_h)),
+            'food': np.zeros((args.num_colonies, grid_w, grid_h))
+        }
+
+        # also max values for debugging, switched to np for consistency
+        self.max_values = {
+            'home': np.zeros(args.num_colonies),
+            'food': np.zeros(args.num_colonies)
+        }
+
+    def add_pheromone(self, colony_id, x, y, pheromone_type):
         grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
-        if self.pheromones[color][(grid_x, grid_y)] < self.args.pheromone_saturation:
-            self.pheromones[color][(grid_x, grid_y)] += min(self.args.pheromone_deposit_rate,
-                                                            self.args.pheromone_saturation - int(
-                                                                self.pheromones[color][(grid_x, grid_y)]))
+        if self.pheromones[pheromone_type][colony_id, grid_x, grid_y] < self.args.pheromone_saturation: # hard cap
+            self.pheromones[pheromone_type][colony_id, grid_x, grid_y] += min(
+                self.args.pheromone_deposit_rate,
+                self.args.pheromone_saturation - int(self.pheromones[pheromone_type][colony_id, grid_x, grid_y])
+            )
 
     def process_pheromones(self):
+        # process every few frames for performance
         if self.frame_count % self.args.pheromone_process_interval != 0:
             self.frame_count += 1
             return
 
         self.frame_count += 1
 
-        # misc
-        grid_w = self.args.screen_width // self.args.grid_size
-        grid_h = self.args.screen_height // self.args.grid_size
+        # main loop, pheromones are processed for all colonies inside the function
+        for pheromone_type in ['home', 'food']:
+            self.diffuse_and_decay_pheromones(pheromone_type)
 
-        for color in self.pheromones:
-            new_pheromones = defaultdict(float)
-            self.max_values[color] = 0
+    def diffuse_and_decay_pheromones(self, pheromone_type):
+        # diffuse and decay the whole grid (all colonies) for a given pheromone type
 
-            for (grid_x, grid_y), strength in self.pheromones[color].items():
+        np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+        with open('pheromone_debug.log', 'a') as log_file:
 
-                if self.max_values[color] < strength:
-                    self.max_values[color] = strength
+            # decay with simple numpy operation for all colonies
+            self.pheromones[pheromone_type] *= self.decay_rate
 
-                strength *= self.args.pheromone_decay_rate
-                if strength <= self.args.pheromone_cull_threshold:  # Just to cull very small values
-                    continue
-                new_pheromones[(grid_x, grid_y)] = strength
+            # diffuse per colony
+            for colony_id in range(self.args.num_colonies):  # For each colony
+                pheromone_layer = self.pheromones[pheromone_type][colony_id]
 
-                # Diffuse pheromones to neighbors which have <= the amount in current cell
-                threshold = strength * self.args.pheromone_diffusion_rate / 8
-                # just to make sure i'm not introducing redundancies
-                # this value won't actually be used but is the minimum value required for diffusion
-                if threshold > self.args.pheromone_cull_threshold:
-                    # new_pheromones[(grid_x, grid_y)] -= diffusion_amount * 8
-                    candidates = {}
-                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]:
-                        nx, ny = grid_x + dx, grid_y + dy
-                        # add neighbour candidates
-                        if 0 <= nx < grid_w and 0 <= ny < grid_h:
-                            str_candidate = self.pheromones[color].get((nx, ny), 0.0)
-                            if str_candidate < strength:  # only smaller values
-                                candidates[(nx, ny)] = str_candidate
-                    count = len(candidates)
-                    if count > 0: # if there are any candidates
-                        diffusion_amount = strength * self.args.pheromone_diffusion_rate / count
-                        new_pheromones[(grid_x, grid_y)] -= diffusion_amount * count  # conservation of numbers for donor
-                        # distribute to candidates and put them in new_pheromones
-                        for (nx, ny), str_candidate in candidates.items():
-                            new_pheromones[(nx, ny)] = str_candidate + diffusion_amount
+                # diffusion accumulator
+                diffused = np.zeros_like(pheromone_layer)
+                neighbor_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)]
 
-            self.pheromones[color] = new_pheromones
-            print(len(self.pheromones[color]))
+                # debug
+                debug = False
+                if np.any(pheromone_layer > 1):
+                    debug = False
+
+                if debug:
+                    log_file.write("BEGIN PHEROMONE UPDATE\n")
+                    log_file.write(f"Pheromone layer before diffusion:\n{pheromone_layer[pheromone_layer > 0]}\n")
+
+                # for each neighbour mask with rule and calculate diffusion amount
+                for dx, dy in neighbor_offsets:
+                    # shift the array to check neighbours
+                    # note that shifts with dx actually shift on the pixel Y axis and vice versa
+                    shifted = np.roll(pheromone_layer, shift=dx, axis=0)
+                    shifted = np.roll(shifted, shift=dy, axis=1)
+
+                    # mask to only diffuse to lesser neighbours and to stop diffusing once the current cell is
+                    # below a certain cull threshold
+                    diffusion_mask = (shifted < pheromone_layer) & (pheromone_layer >= self.args.pheromone_cull_threshold)
+
+                    # amount calculated assuming the spread would be to all 8 neighbours,
+                    # however this is mostly not the case, but the limit is easier to calculate
+                    diffusion_amount = pheromone_layer * self.args.pheromone_diffusion_rate / 8
+
+                    # tricky part
+                    # the mask will mark the i,j cell in pheromone_layer under the conditions
+                    # therefore to spread to the actual neighbour we need to unroll
+                    diffused += np.roll(diffusion_amount * diffusion_mask, shift=(-dx, -dy), axis=(0, 1))
+                    # don't forget to substract the diffused amount from the actual cell
+                    # here we don't need to shift because the mask already targets cell i,j
+                    pheromone_layer -= diffusion_amount * diffusion_mask
+
+                if debug:
+                    log_file.write(f"Diffused grid:\n{diffused[diffused > 0]}\n")
+
+                # add the diffused values
+                self.pheromones[pheromone_type][colony_id] += diffused
+
+                if debug:
+                    log_file.write(f"Updated pheromone layer:\n{self.pheromones[pheromone_type][colony_id][self.pheromones[pheromone_type][colony_id] > 0]}\n")
+                    log_file.write("END OF PHEROMONE UPDATE\n")
+                debug = False
+
+            # also update max for debugging
+            self.max_values[pheromone_type][colony_id] = np.max(self.pheromones[pheromone_type][colony_id])
 
     def draw_pheromones(self, screen):
-        for color, pheromone_map in self.pheromones.items():
-            for (grid_x, grid_y), strength in pheromone_map.items():
-                if strength > 0:
-                    alpha = min(255,
-                                int(strength / (self.max_values[color] + 1) * 255))  # Normalize strength to [0, 255]
-                    pheromone_color = (*color, alpha)
-                    surface = pygame.Surface((self.args.grid_size, self.args.grid_size), pygame.SRCALPHA)
-                    surface.fill(pheromone_color)
-                    screen.blit(surface, (grid_x * self.args.grid_size, grid_y * self.args.grid_size))
+        grid_size = self.args.grid_size
+        for pheromone_type in ['home', 'food']:
+            for colony_id in range(self.args.num_colonies):
+                pheromone_layer = self.pheromones[pheromone_type][colony_id]
+                for (grid_x, grid_y), strength in np.ndenumerate(pheromone_layer):
+                    if strength > 0:
+                        color = self.args.colony_colors[colony_id]  # Use the defined color for each colony
+                        alpha = min(255, int(strength * 255 / self.args.pheromone_saturation))
+                        pheromone_color = (*color, alpha)
+                        surface = pygame.Surface((grid_size, grid_size), pygame.SRCALPHA)
+                        surface.fill(pheromone_color)
+                        screen.blit(surface, (grid_x * grid_size, grid_y * grid_size))
 
-    def get_pheromone_strength(self, x, y):  # for mouse input
-        grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
-        strengths = {color: self.pheromones[color][(grid_x, grid_y)] for color in self.pheromones if
-                     (grid_x, grid_y) in self.pheromones[color]}
-        return strengths
-
-
-"""    def get_nearest_pheromone_tile(self, color, x, y, min_strength, max_range, direction=None):
-        nearest_tile = None
-        nearest_distance = max_range
-        grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
-
-        for (px, py), strength in self.pheromones[color].items():
-            if strength >= min_strength:
-                dist = distance(grid_x, grid_y, px, py)
-                if dist < nearest_distance:
-                    if direction is None or is_in_cone(x, y, px * self.args.grid_size, py * self.args.grid_size,
-                                                       direction, max_range):
-                        nearest_distance = dist
-                        nearest_tile = (px * self.args.grid_size + self.args.grid_size // 2,
-                                        py * self.args.grid_size + self.args.grid_size // 2)
-
-        return nearest_tile
-"""
+    def get_pheromone_strength(self, grid_x, grid_y, colony_id, pheromone_type):
+        return self.pheromones[pheromone_type][colony_id, grid_x, grid_y]
