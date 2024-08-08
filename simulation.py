@@ -4,41 +4,76 @@ import math
 from collections import defaultdict
 import numpy as np
 
-# Colors for visual differentiation
+# Colors
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
+
 # Helper functions
 def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
+
+# Grid to world transformation
 def gridCoord(grid_x, grid_y, grid_size):
     # return the center coordinate of the grid
     return grid_x * grid_size - grid_size // 2, grid_y * grid_size - grid_size // 2
 
-def sampleTile(tiles, samples=1):
+
+def bias_probabilities_exp(pheromones, alpha=2, inverse=False):
+    pheromones = np.array(pheromones)
+
+    # handle edge case where there is only 1 value, or only equal values
+    if len(np.unique(pheromones)) == 1:
+        return np.full(len(pheromones), 1.0 / len(pheromones))
+
+    normalized_pheromones = (pheromones - np.min(pheromones)) / (np.max(pheromones) - np.min(pheromones))
+
+    if inverse:
+        transformed_pheromones = np.exp(-alpha * normalized_pheromones)
+    else:
+        transformed_pheromones = np.exp(alpha * normalized_pheromones)
+
+    probabilities = transformed_pheromones / np.sum(transformed_pheromones)
+    return probabilities
+
+
+def bias_probabilities_power(pheromones, alpha=2, inverse=False):
+    pheromones = np.array(pheromones)
+
+    beta = np.average(pheromones)
+
+    if inverse:
+        transformed_pheromones = (2 * beta - pheromones) ** alpha
+    else:
+        transformed_pheromones = pheromones ** alpha
+
+    probabilities = transformed_pheromones / np.sum(transformed_pheromones)
+    return probabilities
+
+
+def sampleTile(tiles, samples=1, inverse=False, mode='exp'):
     if not tiles:
         return []
 
     strengths = np.array([tile[2] for tile in tiles])
 
-    # Bias towards higher values - power transform
-    alpha = 2
-    strengths = strengths ** alpha
+    if not np.any(strengths > 0):
+        return []  # no pheromone tiles nearby
 
-    sum_strengths = strengths.sum()
-    if sum_strengths:  # avoid division by 0
-        probs = strengths / sum_strengths
-    else:
-        return []  # no pheromone tiles; submit to other behavior
+    if mode == 'exp':
+        probabilities = bias_probabilities_exp(strengths, alpha=3, inverse=inverse)
+    elif mode == 'power':
+        probabilities = bias_probabilities_power(strengths, alpha=3, inverse=inverse)
 
-    sampled_indices = np.random.choice(len(tiles), size=samples, p=probs)
+    sampled_indices = np.random.choice(len(tiles), size=samples, p=probabilities)  # error if mode set incorrectly
     sampled_tiles = [tiles[i] for i in sampled_indices]  # samples = 1 for now
 
     return sampled_tiles
+
 
 class Ant:
     def __init__(self, x, y, colony_id, pheromone_manager, lifetime, home, food_manager, colony, args):
@@ -50,7 +85,7 @@ class Ant:
         self.speed = args.ant_speed
         self.pheromone_manager = pheromone_manager
         self.lifetime = random.uniform(500, lifetime)
-        self.viewRange = 20
+        self.viewRange = args.grid_size * 5
         self.pheromone_detection_threshold = args.pheromone_cull_threshold
         self.foodCarry = 0
         self.biteSize = 10  # how much food can be picked up at one time
@@ -64,6 +99,7 @@ class Ant:
         self.impatience = 0
         self.boredom_threshold = random.normalvariate(50, 10)  # hyperparameter
 
+
         # logging
         self.stats = {
             'distanceTravelled': 0
@@ -74,7 +110,7 @@ class Ant:
         self.x += math.cos(self.angle) * self.speed
         self.y += math.sin(self.angle) * self.speed
 
-        # check for boundaries
+        # check for boundaries - careful, it can leave the screen, it just turns back
         if self.x < 0 or self.x > self.args.screen_width or self.y < 0 or self.y > self.args.screen_height:
             self.angle += math.pi
 
@@ -88,9 +124,12 @@ class Ant:
 
         pygame.draw.circle(screen, color, (int(self.x), int(self.y)), 2)
 
-    def detectPheromones(self, pheromone_type='food'):
+    def detectPheromones(self):
         grid_x, grid_y = int(self.x / self.args.grid_size), int(self.y / self.args.grid_size)
-        pheromone_tiles = []
+        pheromone_tiles = {
+            'food': [],
+            'home': []
+        }
 
         grid_range = self.viewRange // self.args.grid_size  # how many grids away to look
         grid_count_w = self.args.screen_width // self.args.grid_size  # how many grids there are; width
@@ -103,9 +142,14 @@ class Ant:
                 cx, cy = grid_x + dx, grid_y + dy  # current relevant grid
                 if 0 <= cx < grid_count_w and 0 <= cy < grid_count_h:
                     world_x, world_y = gridCoord(cx, cy, self.args.grid_size)  # grid to world
-                    strength = self.pheromone_manager.get_pheromone_strength(cx, cy, self.colony_id, pheromone_type)
-                    if (cx, cy) != (grid_x, grid_y) and strength > 0:
-                        pheromone_tiles.append((world_x, world_y, strength))
+                    # home pheromones
+                    strength_home = self.pheromone_manager.get_pheromone_strength(cx, cy, self.colony_id, 'home')
+                    if (cx, cy) != (grid_x, grid_y) and strength_home > 0:
+                        pheromone_tiles['home'].append((world_x, world_y, strength_home))
+                    # food pheromones
+                    strength_food = self.pheromone_manager.get_pheromone_strength(cx, cy, self.colony_id, 'food')
+                    if (cx, cy) != (grid_x, grid_y) and strength_food > 0:
+                        pheromone_tiles['food'].append((world_x, world_y, strength_food))
 
         return pheromone_tiles
 
@@ -134,12 +178,12 @@ class Ant:
             self.food = False
             self.layPheromone = False
 
-    def carriesFoodBehaviour(self):
+    def carriesFoodBehaviour(self, detected_pheromones):
         noise = random.normalvariate(0, math.pi / 2)  # have a bit of noise each time unless close to home
         if random.randint(0, 10) < 3:  # once in a while bias towards pheromone trail
-            detected_pheromone_tiles = self.detectPheromones('home')
+            detected_pheromone_tiles = self.detectPheromones()['home']
             if detected_pheromone_tiles:
-                target_x, target_y, _ = detected_pheromone_tiles[0] # just the first one for now
+                target_x, target_y, _ = sampleTile(detected_pheromone_tiles)[0]  # just the first one for now
                 pheromone_angle = math.atan2(target_y - self.y, target_x - self.x)
                 noise = random.normalvariate(abs(pheromone_angle - self.angle), math.pi / 8)
 
@@ -152,16 +196,71 @@ class Ant:
         self.checkIfHomeBehaviour()
 
     def sniffPheromonesBehaviour(self):
-        detected_tiles = self.detectPheromones('food')  # returns all tiles around with strength > 0
+        detected_tiles = self.detectPheromones()['food']  # returns all tiles around with strength > 0
         if detected_tiles:
             # probabilistically samples pheromone tiles
             target_x, target_y, _ = sampleTile(detected_tiles)[0]
             self.walkToTarget(target_x, target_y)
 
+    def searchFoodBehaviour(self, detected_pheromones):
+        self.layPheromone = 'home'
+        current_pos = np.array([self.x, self.y])
+        new_direction = np.zeros(2)
+
+        # to be filled
+        food_str = 0
+        to_food_vec = np.zeros(2)
+        home_str = 0
+        away_home_vec = np.zeros(2)
+
+        food_pheromone_tile = None
+        home_pheromone_tile = None
+        #####
+
+        if detected_pheromones['food']:
+            food_pheromone_tile = sampleTile(detected_pheromones['food'])[0]  # maybe empty
+        if food_pheromone_tile:
+            food_pos = np.array([food_pheromone_tile[0], food_pheromone_tile[1]])
+            food_str = food_pheromone_tile[2]
+            to_food_vec = food_pos - current_pos
+
+        # see if there's any home pheromone tiles in the way
+        home_pheromone_tiles = []
+        for tile in detected_pheromones['home']:
+            if is_in_cone(self.x, self.y, tile[0], tile[1], self.angle, self.viewRange,
+                          min_range=self.args.grid_size * 4):
+                home_pheromone_tiles.append(tile)
+        # if there's any home pheromone tiles
+        if home_pheromone_tiles:
+            home_pheromone_tile = sampleTile(home_pheromone_tiles)[0]
+        if home_pheromone_tile:
+            home_ph_pos = np.array([home_pheromone_tile[0], home_pheromone_tile[1]])
+            home_str = home_pheromone_tile[2]
+            away_home_vec = current_pos - home_ph_pos
+
+        # normalise vectors and add to direction
+        if to_food_vec.any():
+            dist = np.linalg.norm(to_food_vec)
+            if dist > 0:
+                to_food_vec /= dist
+            new_direction += to_food_vec * food_str
+        if away_home_vec.any():
+            dist = np.linalg.norm(away_home_vec)
+            if dist > 0:
+                away_home_vec /= dist
+            new_direction += away_home_vec * home_str
+
+        # bias towards the food and away from home
+        if np.any(new_direction):  # should be all zeros if nothing happened
+            self.angle = np.arctan2(new_direction[1], new_direction[0])
+        else:
+            self.randomWalk()
+
     def brain(self):
         nearby_food = self.food_manager.check_for_food(self.x, self.y, self.angle, self.viewRange)
+        detected_pheromones = self.detectPheromones()
 
-        if nearby_food and not self.food:
+        if nearby_food and not self.food:  # detect food behaviour
             self.walkToTarget(nearby_food.x, nearby_food.y)
             if distance(self.x, self.y, nearby_food.x, nearby_food.y) < 5:
                 self.food = True
@@ -169,11 +268,9 @@ class Ant:
                 nearby_food.pickUp(self.biteSize)
                 self.angle += math.pi
         elif self.foodCarry > 0:
-            self.carriesFoodBehaviour()
-        elif random.randint(0, 10) <= 7:
-            self.sniffPheromonesBehaviour()
+            self.carriesFoodBehaviour(detected_pheromones)
         else:
-            self.randomWalk()
+            self.searchFoodBehaviour(detected_pheromones)
 
     def update(self):
         self.brain()
@@ -196,8 +293,9 @@ class Colony:
         self.color = color
         self.pheromone_manager = pheromone_manager
         self.food_manager = food_manager
-        self.ants = [Ant(x, y, colony_id, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
-                     for _ in range(args.ant_count)]
+        self.ants = [
+            Ant(x, y, colony_id, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
+            for _ in range(args.ant_count)]
         self.food_collected = 0
         self.args = args
         self.cycles_to_spawn = args.cycles_to_spawn
@@ -329,19 +427,20 @@ def is_in_cone(x1, y1, x2, y2, direction, max_range, angle=math.pi / 4, min_rang
         delta_angle = 2 * math.pi - delta_angle
     return delta_angle < angle
 
+
 class PheromoneManager:
     def __init__(self, args):
         self.args = args
         self.decay_rate = args.pheromone_decay_rate
         self.frame_count = 0  # to track frames for processing intervals
 
-        grid_w = args.screen_width // args.grid_size
-        grid_h = args.screen_height // args.grid_size
+        self.grid_w = args.screen_width // args.grid_size
+        self.grid_h = args.screen_height // args.grid_size
 
         # switched to numpy arrays for performance
         self.pheromones = {
-            'home': np.zeros((args.num_colonies, grid_w, grid_h)),
-            'food': np.zeros((args.num_colonies, grid_w, grid_h))
+            'home': np.zeros((args.num_colonies, self.grid_w, self.grid_h)),
+            'food': np.zeros((args.num_colonies, self.grid_w, self.grid_h))
         }
 
         # also max values for debugging, switched to np for consistency
@@ -352,7 +451,12 @@ class PheromoneManager:
 
     def add_pheromone(self, colony_id, x, y, pheromone_type):
         grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
-        if self.pheromones[pheromone_type][colony_id, grid_x, grid_y] < self.args.pheromone_saturation: # hard cap
+
+        # bounds checking
+        if (not (0 <= grid_x < self.grid_w)) or (not (0 <= grid_y < self.grid_h)):
+            return
+
+        if self.pheromones[pheromone_type][colony_id, grid_x, grid_y] < self.args.pheromone_saturation:  # hard cap
             self.pheromones[pheromone_type][colony_id, grid_x, grid_y] += min(
                 self.args.pheromone_deposit_rate,
                 self.args.pheromone_saturation - int(self.pheromones[pheromone_type][colony_id, grid_x, grid_y])
@@ -405,7 +509,8 @@ class PheromoneManager:
 
                     # mask to only diffuse to lesser neighbours and to stop diffusing once the current cell is
                     # below a certain cull threshold
-                    diffusion_mask = (shifted < pheromone_layer) & (pheromone_layer >= self.args.pheromone_cull_threshold)
+                    diffusion_mask = (shifted < pheromone_layer) & (
+                            pheromone_layer >= self.args.pheromone_cull_threshold)
 
                     # amount calculated assuming the spread would be to all 8 neighbours,
                     # however this is mostly not the case, but the limit is easier to calculate
@@ -426,7 +531,8 @@ class PheromoneManager:
                 self.pheromones[pheromone_type][colony_id] += diffused
 
                 if debug:
-                    log_file.write(f"Updated pheromone layer:\n{self.pheromones[pheromone_type][colony_id][self.pheromones[pheromone_type][colony_id] > 0]}\n")
+                    log_file.write(
+                        f"Updated pheromone layer:\n{self.pheromones[pheromone_type][colony_id][self.pheromones[pheromone_type][colony_id] > 0]}\n")
                     log_file.write("END OF PHEROMONE UPDATE\n")
                 debug = False
 
@@ -442,7 +548,11 @@ class PheromoneManager:
                     if strength > 0:
                         color = self.args.colony_colors[colony_id]  # Use the defined color for each colony
                         alpha = min(255, int(strength * 255 / self.args.pheromone_saturation))
-                        pheromone_color = (*color, alpha)
+                        if pheromone_type == 'food':
+                            pheromone_color = (*color, alpha)
+                        else:
+                            negate_color = (255 - color[0], 255 - color[1], 255 - color[2])
+                            pheromone_color = (*negate_color, alpha)
                         surface = pygame.Surface((grid_size, grid_size), pygame.SRCALPHA)
                         surface.fill(pheromone_color)
                         screen.blit(surface, (grid_x * grid_size, grid_y * grid_size))
