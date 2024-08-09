@@ -36,12 +36,17 @@ def run_experiment_with_config(args):
         # Display pheromone strength under mouse position
         mouse_x, mouse_y = pygame.mouse.get_pos()
         grid_x, grid_y = mouse_x // args.grid_size, mouse_y // args.grid_size
-        pheromone_strength = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'food')  # Single float value
+        pheromone_strength_food = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'food')  # Single float value
+        pheromone_strength_home = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'home')
 
         # Create a text surface to display pheromone strength
-        strength_text = f'Pheromone Strength: {pheromone_strength:.2f}'
-        text_surface = font.render(strength_text, True, (0, 0, 0))
+        strength_text_food = f'Pheromone Strength (food): {pheromone_strength_food:.2f}'
+        text_surface = font.render(strength_text_food, True, (0, 0, 0))
         screen.blit(text_surface, (10, 10))
+
+        strength_text_home = f'Pheromone Strength (home): {pheromone_strength_home:.2f}'
+        text_surface = font.render(strength_text_home, True, (0, 0, 0))
+        screen.blit(text_surface, (10, 25))
 
         # Display maximum pheromone values for each type
         for pheromone_type in ['home', 'food']:
@@ -56,7 +61,7 @@ def run_experiment_with_config(args):
                           f'Current Ants: {stats["currentAnts"]}, Dead Ants: {stats["deadAnts"]}, '
                           f'Cycles To Spawn: {stats["cycles_to_spawn"]}')
             stats_surface = font.render(stats_text, True, colony.color)
-            screen.blit(stats_surface, (10, 40 + i * 15))
+            screen.blit(stats_surface, (10, 70 + i * 15))
 
         # Display simulation cycles and time per cycle
         currTime = clock.get_time()

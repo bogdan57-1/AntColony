@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 import numpy as np
 
-# Colors
+# Colors for colonies
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
@@ -12,17 +12,34 @@ GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 
 
-# Helper functions
+# helper functions
 def distance(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
 
-# Grid to world transformation
+# returns true if a particular object_2 is within object_1's cone field of view.
+# requires the direction and max range of object_1.
+# the angle parameter represents the shape of the cone. defaults to 45 degrees.
+# the scan will be performed as min_range<=obj_2<=max_range.
+def is_in_cone(x1, y1, x2, y2, direction, max_range, angle=math.pi / 4, min_range=1):
+    dx, dy = x2 - x1, y2 - y1
+    dist = math.sqrt(dx ** 2 + dy ** 2)
+    if dist > max_range or dist < min_range:
+        return False
+    angle_to_target = math.atan2(dy, dx)
+    delta_angle = abs(direction - angle_to_target)
+    if delta_angle > math.pi:
+        delta_angle = 2 * math.pi - delta_angle
+    return delta_angle < angle
+
+
+# grid to world transformation
 def gridCoord(grid_x, grid_y, grid_size):
     # return the center coordinate of the grid
     return grid_x * grid_size - grid_size // 2, grid_y * grid_size - grid_size // 2
 
 
+# bias using exponential modelling
 def bias_probabilities_exp(pheromones, alpha=2, inverse=False):
     pheromones = np.array(pheromones)
 
@@ -41,6 +58,7 @@ def bias_probabilities_exp(pheromones, alpha=2, inverse=False):
     return probabilities
 
 
+# bias using power transform
 def bias_probabilities_power(pheromones, alpha=2, inverse=False):
     pheromones = np.array(pheromones)
 
@@ -55,6 +73,10 @@ def bias_probabilities_power(pheromones, alpha=2, inverse=False):
     return probabilities
 
 
+# takes a list of tiles and probabilistically samples one or more depending on the tiles' pheromone strength.
+# have not used it with multiple samples.
+# supports two different sampling modes: 'power' and 'exp'.
+# inverse=True will bias towards smaller strengths.
 def sampleTile(tiles, samples=1, inverse=False, mode='exp'):
     if not tiles:
         return []
@@ -99,12 +121,12 @@ class Ant:
         self.impatience = 0
         self.boredom_threshold = random.normalvariate(50, 10)  # hyperparameter
 
-
         # logging
         self.stats = {
             'distanceTravelled': 0
         }
 
+    # called on update to move the ant to a new coordinate
     def move(self):
         # basic movement
         self.x += math.cos(self.angle) * self.speed
@@ -117,6 +139,7 @@ class Ant:
         # log
         self.stats['distanceTravelled'] += self.speed
 
+    # draw the ant. use green colour if it carries food.
     def draw(self, screen):
         color = self.colony.color
         if self.food:
@@ -124,6 +147,7 @@ class Ant:
 
         pygame.draw.circle(screen, color, (int(self.x), int(self.y)), 2)
 
+    # scans around the ant and returns the nearby pheromone tiles (for both types)
     def detectPheromones(self):
         grid_x, grid_y = int(self.x / self.args.grid_size), int(self.y / self.args.grid_size)
         pheromone_tiles = {
@@ -153,6 +177,9 @@ class Ant:
 
         return pheromone_tiles
 
+    # default wandering behaviour
+    # the ant moves with a preset speed around, and changes direction when it gets 'bored'
+    # function is used as part of food searching behaviour
     def randomWalk(self):
         self.speed = self.args.ant_speed
 
@@ -164,37 +191,66 @@ class Ant:
             self.angle = random.uniform(self.angle - math.pi / 2, self.angle + math.pi / 2)
             self.impatience = 0
 
+    # used to direct the ant towards a particular coordinate by adjusting its angle of movement
+    # also supports the addition of a noise parameter to affect the angle, however this is ill designed and deprecated
+    # as it did not achieve the desired outcome
     def walkToTarget(self, x, y, noise=None):
         self.speed = self.args.ant_speed
         self.angle = math.atan2(y - self.y, x - self.x)
         if noise:
             self.angle += noise
 
+    # behaviour for determining whether the ant has reached the colony
+    # if true, then it will deposit the food and switch its pheromone lay state
     def checkIfHomeBehaviour(self):
         if distance(self.x, self.y, self.home['x'], self.home['y']) < 5:
             # deposit food
             self.colony.depositFood(self.foodCarry)
             self.foodCarry = 0
             self.food = False
-            self.layPheromone = False
+            self.layPheromone = 'home'
 
+    # if the ant is carrying food it should be aiming to return home.
+    # on return, the ant lays 'food' pheromones which will guide other ants towards the food source in the future.
+    # the principle here is to bias the movement towards a 'home' trail that is leaving the colony, hence
+    # sampling with the inverse mode which favours lower strength tiles - however, this may not have the desired effect
+    # once multiple ants are picking up on a trail.
+    # the ant will also check its viewing cone - if it 'sees' the colony it will aim towards it.
     def carriesFoodBehaviour(self, detected_pheromones):
-        noise = random.normalvariate(0, math.pi / 2)  # have a bit of noise each time unless close to home
-        if random.randint(0, 10) < 3:  # once in a while bias towards pheromone trail
-            detected_pheromone_tiles = self.detectPheromones()['home']
-            if detected_pheromone_tiles:
-                target_x, target_y, _ = sampleTile(detected_pheromone_tiles)[0]  # just the first one for now
-                pheromone_angle = math.atan2(target_y - self.y, target_x - self.x)
-                noise = random.normalvariate(abs(pheromone_angle - self.angle), math.pi / 8)
+        self.layPheromone = 'food'
+        current_pos = np.array([self.x, self.y])
+        new_direction = np.zeros(2)
 
+        # to be filled
+        home_str = 0
+        home_vec = np.zeros(2)
+        home_pheromone_tile = None
+        ###
+
+        # follow 'home' trail
+        if detected_pheromones['home']:
+            home_pheromone_tile = sampleTile(detected_pheromones['home'], inverse=True)[0]  # maybe empty
+        if home_pheromone_tile:
+            home_ph_pos = np.array([home_pheromone_tile[0], home_pheromone_tile[1]])
+            home_str = home_pheromone_tile[2]
+            home_vec = home_ph_pos - current_pos
+
+        if home_vec.any():
+            dist = np.linalg.norm(home_vec)
+            if dist > 0:
+                home_vec /= dist
+            new_direction += home_vec # * home_str # is this even what i want?
+
+        if np.any(new_direction):  # should be all zeros if nothing happened
+            self.angle = np.arctan2(new_direction[1], new_direction[0])
+
+        # reach home if nearby
         if is_in_cone(self.x, self.y, self.home['x'], self.home['y'], self.angle, self.viewRange):
             self.walkToTarget(self.home['x'], self.home['y'])
-        else:
-            self.walkToTarget(self.home['x'], self.home['y'])
 
-        self.layPheromone = 'food'
         self.checkIfHomeBehaviour()
 
+    # deprecated function
     def sniffPheromonesBehaviour(self):
         detected_tiles = self.detectPheromones()['food']  # returns all tiles around with strength > 0
         if detected_tiles:
@@ -202,6 +258,10 @@ class Ant:
             target_x, target_y, _ = sampleTile(detected_tiles)[0]
             self.walkToTarget(target_x, target_y)
 
+    # main wandering behaviour.
+    # the idea here is to bias the ant towards food trails (sample in inverse?) and away from home trails.
+    # this is needs heavy adjusting as obviously a path to a food source will have both. maybe split this into different
+    # behaviours which alternate depending on conditions.
     def searchFoodBehaviour(self, detected_pheromones):
         self.layPheromone = 'home'
         current_pos = np.array([self.x, self.y])
@@ -225,6 +285,7 @@ class Ant:
             to_food_vec = food_pos - current_pos
 
         # see if there's any home pheromone tiles in the way
+        """
         home_pheromone_tiles = []
         for tile in detected_pheromones['home']:
             if is_in_cone(self.x, self.y, tile[0], tile[1], self.angle, self.viewRange,
@@ -237,49 +298,57 @@ class Ant:
             home_ph_pos = np.array([home_pheromone_tile[0], home_pheromone_tile[1]])
             home_str = home_pheromone_tile[2]
             away_home_vec = current_pos - home_ph_pos
-
+        """
         # normalise vectors and add to direction
+        # idea was to get both vectors and add them with a weight corresponding the strength of the pheromone
         if to_food_vec.any():
             dist = np.linalg.norm(to_food_vec)
             if dist > 0:
                 to_food_vec /= dist
-            new_direction += to_food_vec * food_str
+            new_direction += to_food_vec # * food_str
+        """    
         if away_home_vec.any():
             dist = np.linalg.norm(away_home_vec)
             if dist > 0:
                 away_home_vec /= dist
             new_direction += away_home_vec * home_str
-
-        # bias towards the food and away from home
+        """
+        # bias towards the food (and away from home - didn't work correctly, needs adjusting, no time left)
         if np.any(new_direction):  # should be all zeros if nothing happened
             self.angle = np.arctan2(new_direction[1], new_direction[0])
         else:
             self.randomWalk()
 
+    # behaviour to pick up any detected food within its viewing range
+    def pickUpFoodBehaviour(self, nearby_food):
+        self.walkToTarget(nearby_food.x, nearby_food.y)
+        if distance(self.x, self.y, nearby_food.x, nearby_food.y) < 5:
+            self.food = True
+            self.foodCarry = self.biteSize
+            nearby_food.pickUp(self.biteSize)
+            self.angle += math.pi
+
+    # the logic center of the ant. It checks for nearby food and pheromones and decides which behaviour to adopt.
     def brain(self):
         nearby_food = self.food_manager.check_for_food(self.x, self.y, self.angle, self.viewRange)
         detected_pheromones = self.detectPheromones()
 
-        if nearby_food and not self.food:  # detect food behaviour
-            self.walkToTarget(nearby_food.x, nearby_food.y)
-            if distance(self.x, self.y, nearby_food.x, nearby_food.y) < 5:
-                self.food = True
-                self.foodCarry = self.biteSize
-                nearby_food.pickUp(self.biteSize)
-                self.angle += math.pi
-        elif self.foodCarry > 0:
+        if nearby_food and not self.food:  # pick up food
+            self.pickUpFoodBehaviour(nearby_food)
+        elif self.foodCarry > 0:  # carry food
             self.carriesFoodBehaviour(detected_pheromones)
-        else:
+        else:  # search for food
             self.searchFoodBehaviour(detected_pheromones)
 
+    # ant update function. responsibility passed to colony class
     def update(self):
-        self.brain()
-        self.move()
+        self.brain()  # think
+        self.move()  # and move
 
-        if self.layPheromone:
+        if self.layPheromone:  # lay pheromone depending on state
             self.pheromone_manager.add_pheromone(self.colony_id, self.x, self.y, self.layPheromone)
 
-        self.lose_health()
+        self.lose_health()  # ants will lose health over time
 
     def lose_health(self):
         self.lifetime -= 1
@@ -308,9 +377,12 @@ class Colony:
             'cycles_to_spawn': self.cycles_to_spawn
         }
 
+    # used by ants to signal that food has been deposited into the colony
     def depositFood(self, amount):
+        self.food_collected += amount
         self.stats['food'] += amount
 
+    # since ants can die, there is a need to be able to respawn some over time
     def spawnAnts(self, amount):
         for _ in range(amount):
             home = {'x': self.x, 'y': self.y}
@@ -319,6 +391,8 @@ class Colony:
                     self.food_manager, self, self.args))
         self.stats['currentAnts'] = len(self.ants)
 
+    # colony is updated by the main script.
+    # updates the ants, removes any 'dead' ones, and managers respawn mechanic.
     def update(self):
         self.cycles_to_spawn -= 1
         self.stats['cycles_to_spawn'] = self.cycles_to_spawn
@@ -359,19 +433,22 @@ class Food:
     def draw(self, screen):
         pygame.draw.circle(screen, GREEN, (int(self.x), int(self.y)), 5)
 
+    # food piles can be picked up incrementally, depending on the ant's bite size.
     def pickUp(self, amount):
         if self.amount > 0:
             self.amount -= min(amount, self.amount)
 
 
+# class to manage the food piles
 class FoodManager:
     def __init__(self, args):
-        self.grid = defaultdict(list)
+        self.grid = defaultdict(list)  # at a particular set of coordinates there can be multiple food piles stacked
         self.args = args
         self.food_piles_count = args.food_piles_count
-        self.grid_size = args.grid_size
+        self.grid_size = args.grid_size  # the food also spawns on grid tiles to make it easier to manage
         self._populate_grid()
 
+    # spawn the food
     def _populate_grid(self):
         for _ in range(self.food_piles_count):
             food = Food(random.randint(50, self.args.screen_width - 50),
@@ -379,13 +456,15 @@ class FoodManager:
             grid_x, grid_y = int(food.x / self.grid_size), int(food.y / self.grid_size)
             self.grid[(grid_x, grid_y)].append(food)
 
+    # remove a particular food object from the grid
     def _remove_from_grid(self, food):
         grid_x, grid_y = int(food.x / self.grid_size), int(food.y / self.grid_size)
         if food in self.grid[(grid_x, grid_y)]:
             self.grid[(grid_x, grid_y)].remove(food)
-            if not self.grid[(grid_x, grid_y)]:
+            if not self.grid[(grid_x, grid_y)]:  # if the list is empty, remove the dictionary entry to save space
                 del self.grid[(grid_x, grid_y)]
 
+    # helper function to get food piles within a distance (on the grid)
     def _get_nearby_food_piles(self, x, y, dist):
         grid_x, grid_y = int(x / self.grid_size), int(y / self.grid_size)
         nearby_food = []
@@ -396,6 +475,8 @@ class FoodManager:
                     nearby_food.extend(self.grid[(nx, ny)])
         return nearby_food
 
+    # used by the ant to check for nearby food.
+    # it abstracts the underlying food grid by only requesting the ant's position, direction and view range
     def check_for_food(self, x, y, direction, view_range):
         nearby_food_piles = self._get_nearby_food_piles(x, y, view_range)
         for food in nearby_food_piles:
@@ -403,12 +484,15 @@ class FoodManager:
                 return food
         return None
 
+    # update function for piles. also draws them on the screen.
+    # called by the main function. there was no need to have two separate update and draw functions since they are
+    # called consecutively
     def update_and_draw(self, screen):
         empty_piles = []
         for (grid_x, grid_y), piles in self.grid.items():
             for pile in piles:
                 if pile.amount <= 0:
-                    empty_piles.append(pile)
+                    empty_piles.append(pile)  # can't change the list while iterating
                 else:
                     pile.draw(screen)
 
@@ -416,18 +500,7 @@ class FoodManager:
             self._remove_from_grid(pile)
 
 
-def is_in_cone(x1, y1, x2, y2, direction, max_range, angle=math.pi / 4, min_range=1):
-    dx, dy = x2 - x1, y2 - y1
-    dist = math.sqrt(dx ** 2 + dy ** 2)
-    if dist > max_range or dist < min_range:
-        return False
-    angle_to_target = math.atan2(dy, dx)
-    delta_angle = abs(direction - angle_to_target)
-    if delta_angle > math.pi:
-        delta_angle = 2 * math.pi - delta_angle
-    return delta_angle < angle
-
-
+# class to manage the pheromone tiles
 class PheromoneManager:
     def __init__(self, args):
         self.args = args
@@ -449,6 +522,7 @@ class PheromoneManager:
             'food': np.zeros(args.num_colonies)
         }
 
+    # used by ant to signal a release of pheromones
     def add_pheromone(self, colony_id, x, y, pheromone_type):
         grid_x, grid_y = int(x / self.args.grid_size), int(y / self.args.grid_size)
 
@@ -460,8 +534,10 @@ class PheromoneManager:
             self.pheromones[pheromone_type][colony_id, grid_x, grid_y] += min(
                 self.args.pheromone_deposit_rate,
                 self.args.pheromone_saturation - int(self.pheromones[pheromone_type][colony_id, grid_x, grid_y])
-            )
+            )  # add value or difference up to saturation
 
+    # called by main function to process pheromones
+    # will only do so once every few frames to improve performance
     def process_pheromones(self):
         # process every few frames for performance
         if self.frame_count % self.args.pheromone_process_interval != 0:
@@ -474,11 +550,11 @@ class PheromoneManager:
         for pheromone_type in ['home', 'food']:
             self.diffuse_and_decay_pheromones(pheromone_type)
 
+    # diffuse and decay the whole grid (all colonies) for a given pheromone type
     def diffuse_and_decay_pheromones(self, pheromone_type):
-        # diffuse and decay the whole grid (all colonies) for a given pheromone type
 
         np.set_printoptions(threshold=np.inf, linewidth=np.inf)
-        with open('pheromone_debug.log', 'a') as log_file:
+        with open('pheromone_debug.log', 'a') as log_file:  # used to debug, no longer required
 
             # decay with simple numpy operation for all colonies
             self.pheromones[pheromone_type] *= self.decay_rate
@@ -507,7 +583,7 @@ class PheromoneManager:
                     shifted = np.roll(pheromone_layer, shift=dx, axis=0)
                     shifted = np.roll(shifted, shift=dy, axis=1)
 
-                    # mask to only diffuse to lesser neighbours and to stop diffusing once the current cell is
+                    # mask to only diffuse to lesser strength neighbours and to stop diffusing once the current cell is
                     # below a certain cull threshold
                     diffusion_mask = (shifted < pheromone_layer) & (
                             pheromone_layer >= self.args.pheromone_cull_threshold)
@@ -518,9 +594,9 @@ class PheromoneManager:
 
                     # tricky part
                     # the mask will mark the i,j cell in pheromone_layer under the conditions
-                    # therefore to spread to the actual neighbour we need to unroll
+                    # therefore to spread to the actual neighbour we need to unroll with -dx,-dy
                     diffused += np.roll(diffusion_amount * diffusion_mask, shift=(-dx, -dy), axis=(0, 1))
-                    # don't forget to substract the diffused amount from the actual cell
+                    # don't forget to subtract the diffused amount from the actual cell
                     # here we don't need to shift because the mask already targets cell i,j
                     pheromone_layer -= diffusion_amount * diffusion_mask
 
@@ -539,18 +615,20 @@ class PheromoneManager:
             # also update max for debugging
             self.max_values[pheromone_type][colony_id] = np.max(self.pheromones[pheromone_type][colony_id])
 
+    # draws pheromone tiles on the screen.
+    # the food pheromones are drawn using the colony colour, while the home pheromones use the inverted colour
     def draw_pheromones(self, screen):
         grid_size = self.args.grid_size
         for pheromone_type in ['home', 'food']:
             for colony_id in range(self.args.num_colonies):
                 pheromone_layer = self.pheromones[pheromone_type][colony_id]
-                for (grid_x, grid_y), strength in np.ndenumerate(pheromone_layer):
+                for (grid_x, grid_y), strength in np.ndenumerate(pheromone_layer):  # unpack coordinate and value
                     if strength > 0:
                         color = self.args.colony_colors[colony_id]  # Use the defined color for each colony
                         alpha = min(255, int(strength * 255 / self.args.pheromone_saturation))
                         if pheromone_type == 'food':
                             pheromone_color = (*color, alpha)
-                        else:
+                        else: # type == 'home'
                             negate_color = (255 - color[0], 255 - color[1], 255 - color[2])
                             pheromone_color = (*negate_color, alpha)
                         surface = pygame.Surface((grid_size, grid_size), pygame.SRCALPHA)
