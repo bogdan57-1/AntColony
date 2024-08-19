@@ -3,7 +3,8 @@ from factory import SimulationFactory
 from config import load_config_from_file
 
 def run_experiment_with_config(args):
-    # Set up the simulation environment
+
+    # init with factory
     screen, pheromone_manager, food_manager, colonies = SimulationFactory.create_simulation(args)
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 24)
@@ -13,33 +14,33 @@ def run_experiment_with_config(args):
 
     while running:
         for event in pygame.event.get():
+            # exit events
             if event.type == pygame.QUIT:
                 running = False
             if event.type == pygame.KEYUP:
                 running = False
 
-        # Clear the screen with a white background
+        # flush screen buffer first
         screen.fill((255, 255, 255))
 
-        # Process and draw pheromones
+        # update and draw pheromones
         pheromone_manager.process_pheromones()
         pheromone_manager.draw_pheromones(screen)
 
-        # Update and draw each colony
+        # update and draw each colony
         for colony in colonies:
             colony.update()
             colony.draw(screen)
 
-        # Update and draw the food manager
+        # update and draw food piles
         food_manager.update_and_draw(screen)
 
-        # Display pheromone strength under mouse position
+        # debug info
         mouse_x, mouse_y = pygame.mouse.get_pos()
         grid_x, grid_y = mouse_x // args.grid_size, mouse_y // args.grid_size
         pheromone_strength_food = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'food')  # Single float value
         pheromone_strength_home = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'home')
 
-        # Create a text surface to display pheromone strength
         strength_text_food = f'Pheromone Strength (food): {pheromone_strength_food:.2f}'
         text_surface = font.render(strength_text_food, True, (0, 0, 0))
         screen.blit(text_surface, (10, 10))
@@ -48,13 +49,13 @@ def run_experiment_with_config(args):
         text_surface = font.render(strength_text_home, True, (0, 0, 0))
         screen.blit(text_surface, (10, 25))
 
-        # Display maximum pheromone values for each type
+        # max values for home and food pheromones for debugging
         for pheromone_type in ['home', 'food']:
             maxval_text = f'Max {pheromone_type.capitalize()} Pheromone Value: {pheromone_manager.max_values[pheromone_type][0]:.2f}'  # 0 is assumed to be the colony ID
             maxval_text_surface = font.render(maxval_text, True, (0, 0, 0))
-            screen.blit(maxval_text_surface, (10, 25 + 15 * (1 if pheromone_type == 'home' else 2)))
+            screen.blit(maxval_text_surface, (10, 25 + 15 * (1 if pheromone_type == 'home' else 2))) # little hack
 
-        # Display statistics for each colony
+        # colony stats
         for i, colony in enumerate(colonies):
             stats = colony.getStats()
             stats_text = (f'Colony {colony.colony_id}: Food: {stats["food"]}, '
@@ -63,22 +64,20 @@ def run_experiment_with_config(args):
             stats_surface = font.render(stats_text, True, colony.color)
             screen.blit(stats_surface, (10, 70 + i * 15))
 
-        # Display simulation cycles and time per cycle
+        # simulation time info
         currTime = clock.get_time()
         cycles_text = f'Cycles: {cycles}; ms/cycle: {currTime}'
         cycles_surface = font.render(cycles_text, True, (0, 0, 0))
         screen.blit(cycles_surface, (10, 85))
 
-        # Refresh the screen
+        # update screen and clock
         pygame.display.flip()
         clock.tick(args.fps)
         cycles += 1
 
-    # Clean up Pygame resources
     pygame.quit()
 
 if __name__ == "__main__":
-    # Load configuration from file
-    config_path = r'C:\Users\bogda\Desktop\AntColonyPython\config1.json'
+    config_path = "config1.json"
     args = load_config_from_file(config_path)
     run_experiment_with_config(args)

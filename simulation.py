@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 import numpy as np
 
-# Colors for colonies
+# colours for colonies moved to config file, but these are useful as well
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED = (255, 0, 0)
