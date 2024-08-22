@@ -37,17 +37,19 @@ def run_experiment_with_config(args):
 
         # debug info
         mouse_x, mouse_y = pygame.mouse.get_pos()
-        grid_x, grid_y = mouse_x // args.grid_size, mouse_y // args.grid_size
-        pheromone_strength_food = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'food')  # Single float value
-        pheromone_strength_home = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'home')
 
-        strength_text_food = f'Pheromone Strength (food): {pheromone_strength_food:.2f}'
-        text_surface = font.render(strength_text_food, True, (0, 0, 0))
-        screen.blit(text_surface, (10, 10))
+        if 0<mouse_x<args.screen_width-args.grid_size and 0<mouse_y<args.screen_height-args.grid_size:
+            grid_x, grid_y = mouse_x // args.grid_size, mouse_y // args.grid_size
+            pheromone_strength_food = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'food')  # Single float value
+            pheromone_strength_home = pheromone_manager.get_pheromone_strength(grid_x, grid_y, 0, 'home')
 
-        strength_text_home = f'Pheromone Strength (home): {pheromone_strength_home:.2f}'
-        text_surface = font.render(strength_text_home, True, (0, 0, 0))
-        screen.blit(text_surface, (10, 25))
+            strength_text_food = f'Pheromone Strength (food): {pheromone_strength_food:.2f}'
+            text_surface = font.render(strength_text_food, True, (0, 0, 0))
+            screen.blit(text_surface, (10, 10))
+
+            strength_text_home = f'Pheromone Strength (home): {pheromone_strength_home:.2f}'
+            text_surface = font.render(strength_text_home, True, (0, 0, 0))
+            screen.blit(text_surface, (10, 25))
 
         # max values for home and food pheromones for debugging
         for pheromone_type in ['home', 'food']:

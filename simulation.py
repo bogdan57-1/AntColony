@@ -106,7 +106,7 @@ class Ant:
         self.angle = random.uniform(0, 2 * math.pi)
         self.speed = args.ant_speed
         self.pheromone_manager = pheromone_manager
-        self.lifetime = random.uniform(500, lifetime)
+        self.lifetime = random.uniform(int(lifetime*0.8), lifetime)
         self.viewRange = args.grid_size * 5
         self.pheromone_detection_threshold = args.pheromone_cull_threshold
         self.foodCarry = 0
@@ -218,12 +218,12 @@ class Ant:
     # the ant will also check its viewing cone - if it 'sees' the colony it will aim towards it.
     def carriesFoodBehaviour(self, detected_pheromones):
         self.layPheromone = 'food'
-        current_pos = np.array([self.x, self.y])
-        new_direction = np.zeros(2)
+        current_pos = np.array([self.x, self.y], dtype=np.float64)
+        new_direction = np.zeros(2, dtype=np.float64)
 
         # to be filled
         home_str = 0
-        home_vec = np.zeros(2)
+        home_vec = np.zeros(2, dtype=np.float64)
         home_pheromone_tile = None
         ###
 
@@ -264,14 +264,14 @@ class Ant:
     # behaviours which alternate depending on conditions.
     def searchFoodBehaviour(self, detected_pheromones):
         self.layPheromone = 'home'
-        current_pos = np.array([self.x, self.y])
-        new_direction = np.zeros(2)
+        current_pos = np.array([self.x, self.y], dtype=np.float64)
+        new_direction = np.zeros(2, dtype=np.float64)
 
         # to be filled
         food_str = 0
-        to_food_vec = np.zeros(2)
+        to_food_vec = np.zeros(2, dtype=np.float64)
         home_str = 0
-        away_home_vec = np.zeros(2)
+        away_home_vec = np.zeros(2, dtype=np.float64)
 
         food_pheromone_tile = None
         home_pheromone_tile = None
@@ -362,9 +362,7 @@ class Colony:
         self.color = color
         self.pheromone_manager = pheromone_manager
         self.food_manager = food_manager
-        self.ants = [
-            Ant(x, y, colony_id, pheromone_manager, args.ant_lifetime, {'x': x, 'y': y}, food_manager, self, args)
-            for _ in range(args.ant_count)]
+        self.ants = []
         self.food_collected = 0
         self.args = args
         self.cycles_to_spawn = args.cycles_to_spawn
@@ -377,6 +375,8 @@ class Colony:
             'cycles_to_spawn': self.cycles_to_spawn
         }
 
+        self.spawnAnts(args.ant_count)
+
     # used by ants to signal that food has been deposited into the colony
     def depositFood(self, amount):
         self.food_collected += amount
@@ -384,6 +384,7 @@ class Colony:
 
     # since ants can die, there is a need to be able to respawn some over time
     def spawnAnts(self, amount):
+        print("spawning")
         for _ in range(amount):
             home = {'x': self.x, 'y': self.y}
             self.ants.append(
@@ -392,7 +393,7 @@ class Colony:
         self.stats['currentAnts'] = len(self.ants)
 
     # colony is updated by the main script.
-    # updates the ants, removes any 'dead' ones, and managers respawn mechanic.
+    # updates the ants, removes any 'dead' ones, and manages respawn mechanic.
     def update(self):
         self.cycles_to_spawn -= 1
         self.stats['cycles_to_spawn'] = self.cycles_to_spawn
